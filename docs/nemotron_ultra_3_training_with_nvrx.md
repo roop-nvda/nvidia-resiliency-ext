@@ -1,30 +1,30 @@
 # Nemotron Ultra 3 Training with NVRx
 
-This note analyzes the 2026-01-27 in-job experiment using the deck, the current NVRx codebase, and relevant git history.
+This note analyzes the 2026-01-27 in-job experiment using run artifacts, the current NVRx codebase, and relevant git history.
 
 ## Run Configuration
 
-| Item | Value | Source |
-| --- | --- | --- |
-| Slurm job | `1617268` | deck |
-| Array launch | `0-106%97` | deck |
-| Array tasks | `107` | deck |
-| Segment size | `16 nodes` per task | deck |
-| Active tasks | `96` | deck |
-| Hot spare | `1` | deck |
-| Cold spares | `10` | deck |
+| Item | Value |
+| --- | --- |
+| Slurm job | `1617268` |
+| Array launch | `0-106%97` |
+| Array tasks | `107` |
+| Segment size | `16 nodes` per task |
+| Active tasks | `96` |
+| Hot spare | `1` |
+| Cold spares | `10` |
 
-The deck describes one 16-node rack per array task. With `0-106%97`, the steady state was `96` active tasks, `1` running hot spare, and `10` pending cold spares.
+Each array task was one 16-node rack segment. With `0-106%97`, the steady state was `96` active tasks, `1` running hot spare, and `10` pending cold spares.
 
 ## System Diagram
 
-![Slurm allocation, NVRx control, and training cycles](nemotron_ultra_3_nvrx_slurm_cycles_diagram_v4.png)
+![Slurm allocation, NVRx control, and training cycles](nemotron_ultra_3_nvrx_slurm_cycles_diagram_v5.png)
 
-The left panel is static cluster context. Slurm owns the cluster and allocates one subset of racks to the Ultra run. Other racks continue to run other jobs. Inside the Ultra allocation, `96` racks are active, `1` rack is a running hot spare, and `10` racks remain pending as cold spares.
+The left panel shows the Slurm-owned cluster and the Ultra allocation. Active Ultra racks are green, the hot spare is yellow, cold spares are blue and still pending, and other jobs are gray.
 
-The center panel is the NVRx control path. Failure detection opens rendezvous, rendezvous re-forms the world, and workers restart. The hot spare is already in the control plane. Cold spares do not participate until Slurm starts them.
+The center panel shows the NVRx restart loop. Failure detection opens rendezvous, rendezvous re-forms the world, and workers restart.
 
-The right panel is the cycle sequence. Cycle 0 is initial bring-up. Cycle 1 promotes the hot spare and reshuffles ranks. Cycle 2 restarts inside the same allocation. Cycle 3 ends with `XID 149`.
+The right panel shows the cycle sequence. Cycle 0 is initial bring-up. Cycle 1 promotes the hot spare and reshuffles ranks. Cycle 2 restarts inside the same allocation. Cycle 3 ends with `XID 149`. Cold spares were not engaged in any cycle.
 
 ## Restart Path
 
@@ -53,19 +53,34 @@ Observed deltas versus cycle 0:
 - rendezvous time dropped by `84.5%` from cycle 0 to cycle 1,
 - dataloader setup dropped from `114.0s` to `18.2s`.
 
-Cycle 0 also paid the Slurm array long tail. The deck reports that `85` of `97` tasks started within `5s`, while the remaining `11` took about `15` minutes to arrive.
+Cycle 0 also paid the Slurm array long tail. In this run, `85` of `97` tasks started within `5s`, while the remaining `11` took about `15` minutes to arrive.
 
-## Cycle 1 Reshuffle
+## Cycle Notes
 
-The deck reports cycle 1 as a minor reshuffle in which the spare had topological priority.
+### Cycle 0
 
-Current code supports the mechanism behind that result:
+Cycle 0 paid the initial scheduler and bring-up cost. The rendezvous time reflects initial array convergence, not just NVRx recovery logic.
 
-- participant selection is infrastructure-ordered,
-- segment-aware assignment can promote one segment and leave another in standby,
-- spare engagement happens during full world formation for the next cycle, not as a local rack swap.
+### Cycle 1
 
-The deck supplies the run-specific observation. The repo supports the selection and rank-assignment mechanism.
+Cycle 1 is the most informative restart. It included a minor reshuffle in which the spare had topological priority.
+
+The current rendezvous logic is optimized for fast recovery:
+
+- completion occurs as soon as enough segments satisfy `world_size`,
+- it does not wait for all participants,
+- late joiners can therefore be excluded,
+- a hot spare can replace a previously active segment.
+
+In cycle 1, given the racks that joined in time and passed checks, and given the stop-when-complete rule, the spare's rack and `infra_rank` ranked ahead of at least one rack that had been active before. The spare therefore entered the active world, and the rank map changed.
+
+### Cycle 2
+
+Cycle 2 restarted without reshuffling. The active world was rebuilt inside the same allocation, but the hot spare was not needed for participant selection in that cycle.
+
+### Cycle 3
+
+Cycle 3 also restarted without reshuffling. The run then hit `XID 149`, and the progress policy stopped further restart. Cold spares were not engaged in this cycle or any earlier cycle.
 
 ## What the Repo Confirms
 
@@ -76,7 +91,7 @@ The deck supplies the run-specific observation. The repo supports the selection 
 | Segment-aware participant selection | Confirmed | `0fc5f29` |
 | Infrastructure/topology-ordered assignment | Confirmed | current code, plus `8ac6575` |
 | Progress policy can stop repeated low-progress restarts | Confirmed | `8e81a42` |
-| Exact `96 + 1 + 10` run layout | Deck-backed | run-specific, not a generic default |
+| Exact `96 + 1 + 10` run layout | Run-backed | run-specific, not a generic default |
 | Cache warmth explains the lower checkpoint and dataloader times | Inference | supported by KPI pattern, not directly proven by code |
 
 ## Git History
